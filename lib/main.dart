@@ -12,17 +12,24 @@ Future<void> main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
+  ColorScheme darkYellow = ColorScheme.fromSeed(
+      seedColor: Colors.yellow, brightness: Brightness.dark);
+
   runApp(MaterialApp(
     title: 'Daily meeting',
     home: const MainWidget(),
     theme: ThemeData(
+        colorScheme: darkYellow,
+        scrollbarTheme: ScrollbarThemeData(
+            trackColor: WidgetStatePropertyAll(darkYellow.surface),
+            thumbColor: WidgetStatePropertyAll(darkYellow.primary),
+            thumbVisibility: const WidgetStatePropertyAll(true),
+            trackVisibility: const WidgetStatePropertyAll(true)),
         elevatedButtonTheme: const ElevatedButtonThemeData(
             style: ButtonStyle(
                 textStyle: WidgetStatePropertyAll(TextStyle(fontSize: 20)),
                 padding: WidgetStatePropertyAll(
                     EdgeInsets.symmetric(vertical: 20)))),
-        colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.yellow, brightness: Brightness.dark),
         useMaterial3: true,
         listTileTheme: const ListTileThemeData(
             minVerticalPadding: 0,
