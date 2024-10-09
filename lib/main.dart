@@ -27,7 +27,7 @@ Future<void> main() async {
         listTileTheme: const ListTileThemeData(
             minVerticalPadding: 0,
             titleTextStyle: TextStyle(
-              fontSize: 25,
+              fontSize: 30,
               fontWeight: FontWeight.bold,
             ))),
   ));
@@ -44,10 +44,23 @@ class _MainWidgetState extends State<MainWidget> {
   final GlobalKey<RotatingWidgetState> _rotatingWidgetKey =
       GlobalKey<RotatingWidgetState>();
 
+  final GlobalKey<AttendeesWidgetState> _attendeesWidgetKey =
+      GlobalKey<AttendeesWidgetState>();
+
   // Focus management
   final FocusNode _focusNode = FocusNode();
   final FocusNode _durationTextFieldFocusNode = FocusNode();
   final FocusNode _attendeeTextFieldFocusNode = FocusNode();
+
+  late AttendeesWidget _attendeesWidget;
+
+  @override
+  void initState() {
+    super.initState();
+    _attendeesWidget = AttendeesWidget(
+        attendeeTextFieldFocusNode: _attendeeTextFieldFocusNode,
+        key: _attendeesWidgetKey);
+  }
 
   @override
   void dispose() {
@@ -56,6 +69,8 @@ class _MainWidgetState extends State<MainWidget> {
     _attendeeTextFieldFocusNode.dispose();
     super.dispose();
   }
+
+  void next() {}
 
   @override
   Widget build(BuildContext context) {
@@ -70,23 +85,47 @@ class _MainWidgetState extends State<MainWidget> {
               event.logicalKey == LogicalKeyboardKey.space &&
               !_durationTextFieldFocusNode.hasFocus &&
               !_attendeeTextFieldFocusNode.hasFocus) {
-            _rotatingWidgetKey.currentState?.toggleRotation();
+            if (_rotatingWidgetKey.currentState?.isRotating ?? false) {
+              if (_attendeesWidgetKey.currentState?.isLocked() ?? false) {
+                _attendeesWidgetKey.currentState?.unlock();
+                _rotatingWidgetKey.currentState?.resetRotation();
+                if (!(_attendeesWidgetKey.currentState?.next() ?? true)) {
+                  _rotatingWidgetKey.currentState?.stopRotation();
+                }
+              } else {
+                _attendeesWidgetKey.currentState?.lock();
+              }
+            } else {
+              _rotatingWidgetKey.currentState?.toggleRotation();
+            }
+
+            setState(() {});
           }
         },
         child: Scaffold(
-            body: SafeArea(
-                child: Row(
-          children: [
-            Expanded(
-                flex: 2,
-                child: ClockWidget(
-                    rotatingWidgetKey: _rotatingWidgetKey,
-                    durationTextFieldFocusNode: _durationTextFieldFocusNode)),
-            Expanded(
-                flex: 1,
-                child: AttendeesWidget(
-                    attendeeTextFieldFocusNode: _attendeeTextFieldFocusNode))
-          ],
-        ))));
+            body: NotificationListener<Notification>(
+                onNotification: (notification) {
+                  if (notification is NextPersonNotification) {
+                    if (!(_attendeesWidgetKey.currentState?.next() ?? true)) {
+                      _rotatingWidgetKey.currentState?.stopRotation();
+                    }
+                  }
+                  if (notification is ResetClockNotification) {
+                    _rotatingWidgetKey.currentState?.resetRotation();
+                  }
+                  return true;
+                },
+                child: SafeArea(
+                    child: Row(
+                  children: [
+                    Expanded(
+                        flex: 2,
+                        child: ClockWidget(
+                            rotatingWidgetKey: _rotatingWidgetKey,
+                            durationTextFieldFocusNode:
+                                _durationTextFieldFocusNode)),
+                    Expanded(flex: 1, child: _attendeesWidget)
+                  ],
+                )))));
   }
 }

@@ -6,13 +6,18 @@ class AttendeesWidget extends StatefulWidget {
   const AttendeesWidget(
       {super.key, required FocusNode attendeeTextFieldFocusNode})
       : _attendeeTextFieldFocusNode = attendeeTextFieldFocusNode;
+
   final FocusNode _attendeeTextFieldFocusNode;
 
   @override
-  State<AttendeesWidget> createState() => _AttendeesWidget();
+  State<AttendeesWidget> createState() => AttendeesWidgetState();
 }
 
-class _AttendeesWidget extends State<AttendeesWidget> {
+class ResetClockNotification extends Notification {
+  ResetClockNotification();
+}
+
+class AttendeesWidgetState extends State<AttendeesWidget> {
   final SortableShufflableMap _attendees = SortableShufflableMap();
   final TextEditingController _attendeeController = TextEditingController();
 
@@ -26,6 +31,23 @@ class _AttendeesWidget extends State<AttendeesWidget> {
       setState(() {});
     });
   }
+
+  bool next() {
+    setState(() {
+      _attendees.next();
+    });
+    return _attendees.hasActive();
+  }
+
+  void lock() => setState(() {
+        _attendees.lock();
+      });
+
+  void unlock() => setState(() {
+        _attendees.unlock();
+      });
+
+  bool isLocked() => _attendees.isLocked();
 
   @override
   Widget build(BuildContext context) {
@@ -80,45 +102,68 @@ class _AttendeesWidget extends State<AttendeesWidget> {
                     DatabaseService.remove(key);
                   },
                   key: Key(key),
-                  child: Card(
-                      clipBehavior: Clip.none,
-                      shape: ContinuousRectangleBorder(
-                          side: BorderSide(
-                              color: Theme.of(context).colorScheme.surface)),
-                      margin: const EdgeInsets.all(0),
-                      child: ListTile(
-                        trailing: ReorderableDragStartListener(
-                            index: index,
-                            child: const Icon(
-                              Icons.drag_handle,
-                              color: Colors.black,
-                            )),
-                        tileColor: _attendees.get(key) ?? false
-                            ? Theme.of(context).colorScheme.primary
-                            : Theme.of(context)
-                                .colorScheme
-                                .primary
-                                .withOpacity(0.6),
-                        leading: Checkbox(
-                            side: WidgetStateBorderSide.resolveWith(
-                              (states) {
-                                return BorderSide(
-                                    color:
-                                        Theme.of(context).colorScheme.surface,
-                                    width: 2,
-                                    strokeAlign: BorderSide.strokeAlignOutside);
-                              },
+                  child: GestureDetector(
+                      onDoubleTap: () => setState(() {
+                            if (_attendees.setActive(key)) {
+                              ResetClockNotification().dispatch(context);
+                            }
+                          }),
+                      child: Card(
+                          clipBehavior: Clip.none,
+                          shape: ContinuousRectangleBorder(
+                              side: BorderSide(
+                                  color:
+                                      Theme.of(context).colorScheme.surface)),
+                          margin: const EdgeInsets.all(0),
+                          child: ListTile(
+                            trailing: ReorderableDragStartListener(
+                                index: index,
+                                child: const Icon(
+                                  Icons.drag_handle,
+                                  color: Colors.black,
+                                )),
+                            tileColor: _attendees.isActive(key)
+                                ? Colors.yellow
+                                : _attendees.get(key) ?? false
+                                    ? Theme.of(context).colorScheme.primary
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .primary
+                                        .withOpacity(0.6),
+                            leading: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Checkbox(
+                                    side: WidgetStateBorderSide.resolveWith(
+                                      (states) {
+                                        return BorderSide(
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .surface,
+                                            width: 2,
+                                            strokeAlign:
+                                                BorderSide.strokeAlignOutside);
+                                      },
+                                    ),
+                                    fillColor: const WidgetStatePropertyAll(
+                                        Colors.white),
+                                    value: _attendees.get(key) ?? false,
+                                    onChanged: (value) {
+                                      setState(() => _attendees.updateValue(
+                                          key, value ?? false));
+                                      DatabaseService.addOrUpdate(
+                                          key, value ?? false);
+                                    }),
+                                _attendees.isKeyLocked(key)
+                                    ? const Icon(
+                                        Icons.lock,
+                                        color: Colors.black,
+                                      )
+                                    : const SizedBox()
+                              ],
                             ),
-                            fillColor:
-                                const WidgetStatePropertyAll(Colors.white),
-                            value: _attendees.get(key) ?? false,
-                            onChanged: (value) {
-                              setState(() =>
-                                  _attendees.updateValue(key, value ?? false));
-                              DatabaseService.addOrUpdate(key, value ?? false);
-                            }),
-                        title: Text(key),
-                      )));
+                            title: Text(key),
+                          ))));
             },
             onReorder: (int oldIndex, int newIndex) {
               setState(() => _attendees.reorder(oldIndex, newIndex));

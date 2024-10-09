@@ -2,11 +2,61 @@ class SortableShufflableMap {
   final Map<String, bool> _map = {};
   final List<String> _keys = [];
 
+  String? activeKey;
+
   void addAll(Map<String, bool> values) {
     _map.clear();
     _map.addAll(values);
     _keys.clear();
     _keys.addAll(values.keys);
+  }
+
+  bool locked = false;
+
+  void lock() => locked = true;
+
+  void unlock() => locked = false;
+
+  bool isLocked() => locked;
+
+  bool hasActive() => activeKey is String;
+
+  bool isActive(String key) {
+    return key == activeKey;
+  }
+
+  bool isKeyLocked(String key) => isActive(key) && locked;
+
+  bool setActive(String key) {
+    if (!isActive(key) && (_map[key] ?? false)) {
+      activeKey = key;
+      unlock();
+      return true;
+    }
+    return false;
+  }
+
+  void next() {
+    if (locked) {
+      return;
+    }
+
+    int activeIndex = -1;
+
+    if (activeKey is String) {
+      activeIndex = _keys.indexOf(activeKey as String);
+    }
+
+    for (int i = activeIndex + 1; i < _keys.length; i++) {
+      String key = _keys[i];
+      if (_map[key] is bool) {
+        if (_map[key] as bool) {
+          activeKey = key;
+          return;
+        }
+      }
+    }
+    activeKey = null;
   }
 
   void add(String key, bool value) {
@@ -26,6 +76,9 @@ class SortableShufflableMap {
   void updateValue(String key, bool value) {
     if (_map.containsKey(key)) {
       _map[key] = value;
+      if (isActive(key) && !value) {
+        next();
+      }
     }
   }
 

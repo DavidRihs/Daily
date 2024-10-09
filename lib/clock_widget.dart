@@ -94,6 +94,10 @@ class _ClockWidgetState extends State<ClockWidget> {
   }
 }
 
+class NextPersonNotification extends Notification {
+  NextPersonNotification();
+}
+
 class RotatingWidget extends StatefulWidget {
   const RotatingWidget({super.key});
 
@@ -105,6 +109,7 @@ class RotatingWidgetState extends State<RotatingWidget>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   bool isRotating = false;
+  bool isFirstLaunch = true;
 
   bool get isCurrentlyRotating => isRotating;
 
@@ -115,6 +120,14 @@ class RotatingWidgetState extends State<RotatingWidget>
       duration: const Duration(seconds: defaultDuration),
       vsync: this,
     );
+
+    _controller.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        _controller.reset();
+        _controller.forward();
+        NextPersonNotification().dispatch(context);
+      }
+    });
   }
 
   @override
@@ -128,17 +141,27 @@ class RotatingWidgetState extends State<RotatingWidget>
       if (isRotating) {
         _controller.stop();
       } else {
-        _controller.repeat();
+        _controller.forward();
       }
       isRotating = !isRotating;
+      if (isFirstLaunch) {
+        isFirstLaunch = false;
+        NextPersonNotification().dispatch(context);
+      }
+    });
+  }
+
+  void stopRotation() {
+    setState(() {
+      _controller.reset();
+      isRotating = false;
+      isFirstLaunch = true;
     });
   }
 
   void resetRotation() {
-    setState(() {
-      _controller.reset();
-      isRotating = false;
-    });
+    _controller.reset();
+    _controller.forward();
   }
 
   Duration? getRotationDuration() => _controller.duration;
@@ -146,9 +169,9 @@ class RotatingWidgetState extends State<RotatingWidget>
   void setRotationDuration(int seconds) {
     setState(() {
       _controller.duration = Duration(seconds: seconds);
-      _controller.reset();
+      // _controller.reset();
       if (isRotating) {
-        _controller.repeat();
+        _controller.forward();
       }
     });
   }
@@ -157,7 +180,7 @@ class RotatingWidgetState extends State<RotatingWidget>
   Widget build(BuildContext context) {
     return RotationTransition(
       turns: _controller,
-      child: SvgPicture.asset('assets/needles.svg', width: 2000, height: 2000),
+      child: SvgPicture.asset('assets/needle.svg', width: 2000, height: 2000),
     );
   }
 }
