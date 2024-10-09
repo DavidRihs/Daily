@@ -160,8 +160,11 @@ class RotatingWidgetState extends State<RotatingWidget>
   }
 
   void resetRotation() {
-    _controller.reset();
-    _controller.forward();
+    isFirstLaunch = false;
+    if (isRotating) {
+      _controller.reset();
+      _controller.forward();
+    }
   }
 
   Duration? getRotationDuration() => _controller.duration;
