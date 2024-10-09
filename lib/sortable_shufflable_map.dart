@@ -28,9 +28,11 @@ class SortableShufflableMap {
   bool isKeyLocked(String key) => isActive(key) && locked;
 
   bool setActive(String key) {
-    if (!isActive(key) && (_map[key] ?? false)) {
+    if ((_map[key] ?? false)) {
+      if (!isActive(key)) {
+        unlock();
+      }
       activeKey = key;
-      unlock();
       return true;
     }
     return false;
