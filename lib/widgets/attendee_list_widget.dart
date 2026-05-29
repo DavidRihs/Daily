@@ -142,6 +142,7 @@ class _AttendeeListWidgetState extends State<AttendeeListWidget> {
                       shape: const RoundedRectangleBorder(),
                       child: ListTile(
                         dense: true,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 6),
                         tileColor: tileColor,
                         leading: Checkbox(
                           side: WidgetStateBorderSide.resolveWith((_) =>
@@ -189,10 +190,14 @@ class _AttendeeListWidgetState extends State<AttendeeListWidget> {
           const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
-            child: ElevatedButton.icon(
+            child: FilledButton.icon(
               onPressed: _shuffle,
               icon: const Icon(Icons.shuffle, size: 25),
               label: const Text('Randomize', style: TextStyle(fontSize: 25)),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                minimumSize: const Size(0, 36),
+              ),
             ),
           ),
         ],

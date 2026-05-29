@@ -32,7 +32,6 @@ RUN flutter pub get
 # Build
 COPY lib/    lib/
 COPY web/    web/
-COPY assets/ assets/
 RUN flutter build web --release --no-wasm-dry-run
 
 # ── Stage 2: AOT-compile the Dart server ──────────────────────────────────────

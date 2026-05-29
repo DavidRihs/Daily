@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'screens/home_screen.dart';
 
 void main() {
@@ -11,6 +12,11 @@ void main() {
 
   runApp(MaterialApp(
     title: 'Daily',
+    localizationsDelegates: GlobalMaterialLocalizations.delegates,
+    supportedLocales: const [Locale('en'), Locale('fr'), Locale('de'),
+      Locale('es'), Locale('it'), Locale('nl'), Locale('pt'), Locale('ja'),
+      Locale('zh'), Locale('ko'), Locale('ar'), Locale('ru'), Locale('pl'),
+      Locale('tr'), Locale('sv'), Locale('da'), Locale('fi'), Locale('nb')],
     home: const HomeScreen(),
     theme: ThemeData(
       colorScheme: scheme,

@@ -15,14 +15,6 @@ class MeetingSession {
     return '${m}m ${sec}s';
   }
 
-  String get formattedDate {
-    final d = startTime;
-    return '${d.year}-${_pad(d.month)}-${_pad(d.day)} '
-        '${_pad(d.hour)}:${_pad(d.minute)}';
-  }
-
-  String _pad(int n) => n.toString().padLeft(2, '0');
-
   factory MeetingSession.fromJson(Map<String, dynamic> json) => MeetingSession(
         startTime: DateTime.parse(json['startTime'] as String),
         endTime: DateTime.parse(json['endTime'] as String),

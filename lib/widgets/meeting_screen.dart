@@ -1,15 +1,27 @@
 import 'dart:async';
+import 'dart:js_interop';
+import 'dart:math' show pi, cos, sin;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
 import '../models/attendee.dart';
 import '../models/meeting.dart';
 import '../models/meeting_session.dart';
 import '../services/storage_service.dart';
 import 'attendee_list_widget.dart';
+
+// Thin wrapper around the browser's Date object so we can call
+// toLocaleDateString / toLocaleTimeString with no explicit locale — the
+// browser then uses the OS regional settings (e.g. 29.05.2026 on Windows
+// even when the browser UI language is English).
+@JS('Date')
+extension type _JsDate._(JSObject _) implements JSObject {
+  external factory _JsDate(double millisecondsSinceEpoch);
+  external JSString toLocaleDateString();
+  external JSString toLocaleTimeString(JSArray<JSString> locales, JSObject options);
+}
 
 class MeetingScreen extends StatefulWidget {
   final Meeting meeting;
@@ -26,19 +38,23 @@ class MeetingScreen extends StatefulWidget {
 }
 
 class _MeetingScreenState extends State<MeetingScreen>
-    with TickerProviderStateMixin {
+    with SingleTickerProviderStateMixin {
   late List<Attendee> _attendees;
 
   // Running state
   String? _activeAttendeeId;
   bool _isRunning = false;
   DateTime? _meetingStartTime;
-  final Stopwatch _personStopwatch = Stopwatch();
-  final Stopwatch _meetingStopwatch = Stopwatch();
+  final Stopwatch _meetingStopwatch = Stopwatch(); // for the meeting-total timer in the control bar
   Timer? _ticker;
 
-  // Clock animation (only when timeEnabled)
-  AnimationController? _clockController;
+  // Per-person countdown controller — drives the ring dot at 60 fps.
+  // Two AnimatedBuilders (countdown text + ring painter) both listen to this
+  // controller. Flutter notifies all listeners synchronously on the same tick,
+  // so both widgets always read the same .value — desync is impossible.
+  AnimationController? _countdownController;
+  bool _overtime = false;
+  DateTime? _overtimeStart; // set at the exact moment the countdown completes
 
   // Selected attendee for note display (always set when notesEnabled)
   String? _selectedAttendeeId;
@@ -53,18 +69,27 @@ class _MeetingScreenState extends State<MeetingScreen>
   void initState() {
     super.initState();
     _attendees = List.from(widget.meeting.attendees);
-    _initClock();
     _initSelection();
+    if (widget.meeting.timeEnabled) _initCountdown();
     HardwareKeyboard.instance.addHandler(_hardwareKeyHandler);
   }
 
-  void _initClock() {
-    if (widget.meeting.timeEnabled) {
-      _clockController = AnimationController(
-        vsync: this,
-        duration: Duration(seconds: widget.meeting.timePerPerson),
-      );
-    }
+  void _initCountdown() {
+    _countdownController = AnimationController(
+      vsync: this,
+      duration: Duration(seconds: widget.meeting.timePerPerson),
+    )
+      // Permanent listener — fires when the countdown finishes.
+      // No setState needed: AnimatedBuilder is already running at 60 fps and
+      // will pick up the new _overtime/_overtimeStart on the very next frame,
+      // avoiding the freeze that a full setState rebuild would cause.
+      ..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted && _isRunning) {
+          _overtime = true;
+          _overtimeStart = DateTime.now();
+          _countdownController?.repeat();
+        }
+      });
   }
 
   /// When notes are enabled, ensure there is always a selected attendee.
@@ -79,19 +104,15 @@ class _MeetingScreenState extends State<MeetingScreen>
     super.didUpdateWidget(old);
     if (old.meeting.timeEnabled != widget.meeting.timeEnabled) {
       if (widget.meeting.timeEnabled) {
-        _clockController ??= AnimationController(
-          vsync: this,
-          duration: Duration(seconds: widget.meeting.timePerPerson),
-        );
+        _initCountdown();
       } else {
-        _clockController?.dispose();
-        _clockController = null;
+        _countdownController?.dispose();
+        _countdownController = null;
       }
-    }
-    if (widget.meeting.timeEnabled &&
-        _clockController != null &&
-        old.meeting.timePerPerson != widget.meeting.timePerPerson) {
-      _clockController!.duration =
+    } else if (widget.meeting.timeEnabled &&
+        old.meeting.timePerPerson != widget.meeting.timePerPerson &&
+        !_isRunning) {
+      _countdownController?.duration =
           Duration(seconds: widget.meeting.timePerPerson);
     }
     if (!_isRunning) {
@@ -104,10 +125,9 @@ class _MeetingScreenState extends State<MeetingScreen>
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_hardwareKeyHandler);
     _ticker?.cancel();
-    _clockController?.dispose();
+    _countdownController?.dispose();
     _noteController.dispose();
     _meetingStopwatch.stop();
-    _personStopwatch.stop();
     super.dispose();
   }
 
@@ -133,19 +153,40 @@ class _MeetingScreenState extends State<MeetingScreen>
       : _attendees.cast<Attendee?>().firstWhere(
             (a) => a?.id == _selectedAttendeeId, orElse: () => null);
 
-  int get _personElapsed => _personStopwatch.elapsed.inSeconds;
-  bool get _isOvertime =>
-      _isRunning && _personElapsed >= widget.meeting.timePerPerson;
+  // Elapsed seconds — read from the controller so text and dot share the
+  // same value when they are in the same AnimatedBuilder pass.
+  int get _personElapsed {
+    if (_overtime) return widget.meeting.timePerPerson;
+    final ctrl = _countdownController;
+    if (ctrl == null) return 0;
+    return (ctrl.value * widget.meeting.timePerPerson).floor();
+  }
+
+  bool get _isOvertime => _isRunning && _overtime;
 
   String _fmtCountdown() {
-    final c = widget.meeting.timePerPerson - _personElapsed;
-    final abs = c.abs();
-    final m = abs ~/ 60;
-    final s = abs % 60;
-    final sign = c < 0 ? '+' : '';
-    return m > 0
-        ? '$sign${m}m ${s.toString().padLeft(2, '0')}s'
-        : '$sign${s}s';
+    if (_overtime && _overtimeStart != null) {
+      // _overtimeStart is stamped at the exact completion frame so "+0s"
+      // appears in the same build pass as the dot reaching 12 o'clock.
+      final over = DateTime.now().difference(_overtimeStart!).inSeconds;
+      final m = over ~/ 60;
+      final s = over % 60;
+      return m > 0 ? '+${m}m ${s.toString().padLeft(2, '0')}s' : '+${s}s';
+    }
+    final remaining = widget.meeting.timePerPerson - _personElapsed;
+    final m = remaining ~/ 60;
+    final s = remaining % 60;
+    return m > 0 ? '${m}m ${s.toString().padLeft(2, '0')}s' : '${s}s';
+  }
+
+  String _fmtDateTime(DateTime dt) {
+    final d = _JsDate(dt.millisecondsSinceEpoch.toDouble());
+    final date = d.toLocaleDateString().toDart;
+    final time = d.toLocaleTimeString(
+      <JSString>[].toJS, // empty array → use OS regional locale
+      {'hour': '2-digit', 'minute': '2-digit'}.jsify()! as JSObject,
+    ).toDart;
+    return '$date $time';
   }
 
   String _fmtEditedAt(DateTime dt) {
@@ -154,9 +195,7 @@ class _MeetingScreenState extends State<MeetingScreen>
     if (diff.inSeconds < 60) return 'Edited just now';
     if (diff.inMinutes < 60) return 'Edited ${diff.inMinutes}m ago';
     if (diff.inHours < 24) return 'Edited ${diff.inHours}h ago';
-    String pad(int n) => n.toString().padLeft(2, '0');
-    return 'Edited ${dt.year}-${pad(dt.month)}-${pad(dt.day)} '
-        '${pad(dt.hour)}:${pad(dt.minute)}';
+    return 'Edited ${_fmtDateTime(dt)}';
   }
 
   String _fmtMeetingTime() {
@@ -168,16 +207,16 @@ class _MeetingScreenState extends State<MeetingScreen>
 
   MarkdownStyleSheet get _mdStyle =>
       MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-        p: const TextStyle(fontSize: 16, color: Colors.white),
+        p: const TextStyle(fontSize: 20, color: Colors.white),
         h1: const TextStyle(
-            fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white),
+            fontSize: 30, fontWeight: FontWeight.bold, color: Colors.white),
         h2: const TextStyle(
-            fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
+            fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white),
         h3: const TextStyle(
-            fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
-        listBullet: const TextStyle(fontSize: 16, color: Colors.white),
+            fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
+        listBullet: const TextStyle(fontSize: 20, color: Colors.white),
         code: TextStyle(
-            fontSize: 14,
+            fontSize: 18,
             backgroundColor: Colors.grey.shade800,
             color: Colors.greenAccent),
       );
@@ -251,7 +290,12 @@ class _MeetingScreenState extends State<MeetingScreen>
       _activeAttendeeId = null;
     });
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      // When the countdown AnimatedBuilder is running at 60 fps it already
+      // drives all redraws; calling setState here would cause a conflicting
+      // extra rebuild every second, creating the visible stutter.
+      if (_countdownController?.isAnimating ?? false) return;
+      setState(() {});
     });
     final first = _firstEnabledId();
     _activatePerson(first);
@@ -260,9 +304,7 @@ class _MeetingScreenState extends State<MeetingScreen>
   void _stopMeeting() {
     _ticker?.cancel();
     _ticker = null;
-    _clockController?.stop();
-    _clockController?.reset();
-    _personStopwatch.stop();
+    _countdownController?.reset(); // sends dot back to 12 o'clock
     _meetingStopwatch.stop();
 
     final session = MeetingSession(
@@ -291,19 +333,19 @@ class _MeetingScreenState extends State<MeetingScreen>
 
   void _activatePerson(String? id) {
     if (id == null) { _stopMeeting(); return; }
+    _overtime = false;
+    _overtimeStart = null;
+    if (widget.meeting.timeEnabled && _countdownController != null) {
+      _countdownController!.duration =
+          Duration(seconds: widget.meeting.timePerPerson);
+      // forward(from: 0) resets AND starts in one call — both the arc and
+      // the text read controller.value so they are always in sync.
+      _countdownController!.forward(from: 0);
+    }
     setState(() {
       _activeAttendeeId = id;
-      // Note panel always follows the active person during a session
       if (widget.meeting.notesEnabled) _selectedAttendeeId = id;
     });
-    _personStopwatch.reset();
-    _personStopwatch.start();
-    if (widget.meeting.timeEnabled && _clockController != null) {
-      _clockController!.duration =
-          Duration(seconds: widget.meeting.timePerPerson);
-      _clockController!.reset();
-      _clockController!.repeat();
-    }
   }
 
   void _advanceToNext() {
@@ -384,62 +426,60 @@ class _MeetingScreenState extends State<MeetingScreen>
   // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Column(
-        children: [
-          _buildControlBar(),
-          const Divider(height: 1),
-          Expanded(
-            child: Row(
-              children: [
-                // Left panel — 75 % of width
-                Expanded(flex: 3, child: _buildLeftPanel()),
-                const VerticalDivider(width: 1),
-                // Right panel — 25 % of width
-                Expanded(flex: 1, child: _buildRightPanel()),
-              ],
+  Widget build(BuildContext context) => SafeArea(
+        child: Column(
+          children: [
+            _buildControlBar(),
+            const Divider(height: 1),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(flex: 3, child: _buildLeftPanel()),
+                  const VerticalDivider(width: 1),
+                  Expanded(flex: 1, child: _buildRightPanel()),
+                ],
+              ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
+          ],
+        ),
+      );
 
   // ── Control bar ────────────────────────────────────────────────────────────
 
   Widget _buildControlBar() {
     final scheme = Theme.of(context).colorScheme;
     final session = widget.meeting.lastSession;
-    final overtime = _isOvertime;
     const barHeight = 60.0;
     const textSize = 40.0;
 
     // Name shown: active person when running, selected person when stopped + notes
     final displayName = _isRunning
-        ? (_activeAttendee?.name ?? '—')
+        ? (_activeAttendee?.name ?? '')
         : (widget.meeting.notesEnabled
-            ? (_selectedAttendee?.name ?? '—')
-            : '—');
+            ? (_selectedAttendee?.name ?? '')
+            : '');
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
+    return Container(
       height: barHeight,
-      color: (_isRunning && widget.meeting.timeEnabled && overtime)
-          ? scheme.errorContainer.withValues(alpha: 0.25)
-          : scheme.surfaceContainerHighest,
+      color: scheme.surfaceContainerHighest,
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Stack(
         alignment: Alignment.center,
         children: [
           // ── Centered countdown (only when timeEnabled) ──
-          if (widget.meeting.timeEnabled)
-            Text(
-              _isRunning ? _fmtCountdown() : '',
-              style: TextStyle(
-                fontSize: textSize,
-                fontWeight: FontWeight.w600,
-                color: overtime ? scheme.error : scheme.primary
+          // Two AnimatedBuilders on the same controller are notified in the
+          // same frame → the text here and the ring dot in _buildClockPanel
+          // always read the same value and can never be out of sync.
+          if (widget.meeting.timeEnabled && _countdownController != null)
+            AnimatedBuilder(
+              animation: _countdownController!,
+              builder: (_, __) => Text(
+                _isRunning ? _fmtCountdown() : '',
+                style: TextStyle(
+                  fontSize: textSize,
+                  fontWeight: FontWeight.w600,
+                  color: _isOvertime ? scheme.error : scheme.primary,
+                ),
               ),
             ),
           // ── Left / right content row ──
@@ -457,15 +497,27 @@ class _MeetingScreenState extends State<MeetingScreen>
               const Spacer(),
               // Session info / meeting timer (right, before buttons)
               if (_isRunning)
-                Text(
-                  _fmtMeetingTime(),
-                  style: TextStyle(
-                      color: scheme.onSurface.withValues(alpha: 0.55),
-                      fontSize: textSize),
-                )
+                // Same controller as the countdown text — notified in the
+                // same frame, so this stays in sync without extra setState.
+                _countdownController != null
+                  ? AnimatedBuilder(
+                      animation: _countdownController!,
+                      builder: (_, __) => Text(
+                        _fmtMeetingTime(),
+                        style: TextStyle(
+                            color: scheme.onSurface.withValues(alpha: 0.55),
+                            fontSize: textSize),
+                      ),
+                    )
+                  : Text(
+                      _fmtMeetingTime(),
+                      style: TextStyle(
+                          color: scheme.onSurface.withValues(alpha: 0.55),
+                          fontSize: textSize),
+                    )
               else if (session != null)
                 Text(
-                  'Last: ${session.formattedDate} — ${session.formattedDuration}',
+                  'Last: ${_fmtDateTime(session.startTime)} — ${session.formattedDuration}',
                   style: TextStyle(
                       color: scheme.onSurface.withValues(alpha: 0.4),
                       fontSize: 25),
@@ -476,13 +528,13 @@ class _MeetingScreenState extends State<MeetingScreen>
                   icon: const Icon(Icons.skip_previous, size: 40),
                   tooltip: 'Previous',
                   onPressed: _advanceToPrev,
-                  color: scheme.onSurface.withValues(alpha: 0.7),
+                  color: scheme.primary,
                 ),
                 IconButton(
                   icon: const Icon(Icons.skip_next, size: 40),
                   tooltip: 'Next  (Space)',
                   onPressed: _advanceToNext,
-                  color: scheme.onSurface.withValues(alpha: 0.7),
+                  color: scheme.primary,
                 ),
                 const SizedBox(width: 10),
               ],
@@ -525,8 +577,8 @@ class _MeetingScreenState extends State<MeetingScreen>
       return _buildNotePanel(a);
     }
 
-    // Time only → SVG clock
-    if (m.timeEnabled && _clockController != null) {
+    // Time only → arc clock
+    if (m.timeEnabled) {
       return _buildClockPanel();
     }
 
@@ -538,19 +590,21 @@ class _MeetingScreenState extends State<MeetingScreen>
 
   Widget _buildClockPanel() {
     final scheme = Theme.of(context).colorScheme;
+    if (_countdownController == null) return const SizedBox.shrink();
+
     return AnimatedContainer(
       duration: const Duration(milliseconds: 400),
       color: scheme.surfaceContainerLow,
-      padding: const EdgeInsets.all(50.0),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          SvgPicture.asset('assets/clock.svg', fit: BoxFit.contain),
-          RotationTransition(
-            turns: _clockController!,
-            child: SvgPicture.asset('assets/needle.svg', fit: BoxFit.contain),
+      child: AnimatedBuilder(
+        animation: _countdownController!,
+        builder: (_, __) => CustomPaint(
+          painter: _RingClockPainter(
+            progress: _countdownController!.value,
+            dotColor: _isOvertime ? scheme.error : scheme.primary,
+            ringColor: scheme.surfaceContainerHighest,
           ),
-        ],
+          child: const SizedBox.expand(),
+        ),
       ),
     );
   }
@@ -562,7 +616,7 @@ class _MeetingScreenState extends State<MeetingScreen>
     final session = widget.meeting.lastSession;
     final text = message ??
         (session != null
-            ? 'Last: ${session.formattedDate}\n${session.formattedDuration}'
+            ? 'Last: ${_fmtDateTime(session.startTime)}\n${session.formattedDuration}'
             : 'Press Start to begin');
     return Container(
       color: scheme.surfaceContainerLow,
@@ -581,49 +635,36 @@ class _MeetingScreenState extends State<MeetingScreen>
 
   Widget _buildNotePanel(Attendee attendee) {
     final scheme = Theme.of(context).colorScheme;
+
     return Container(
       color: scheme.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Stack(
         children: [
-          // Toolbar: hidden during a running session
-          if (!_isRunning)
-            Container(
-              color: scheme.surfaceContainerHighest,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  if (_editingNote) ...[
-                    TextButton(
-                      onPressed: _cancelEditNote,
-                      child: Text('Cancel',
-                          style: TextStyle(
-                              color: scheme.onSurface.withValues(alpha: 0.7))),
-                    ),
-                    const SizedBox(width: 6),
-                    ElevatedButton(
-                      onPressed: _saveNote,
-                      child: const Text('Save'),
-                    ),
-                  ] else
-                    TextButton.icon(
-                      onPressed: _startEditNote,
-                      icon: const Icon(Icons.edit, size: 15),
-                      label: const Text('Edit note'),
-                      style: TextButton.styleFrom(
-                          foregroundColor: scheme.primary),
-                    ),
-                ],
-              ),
-            ),
-          // Content
-          Expanded(
+          Positioned.fill(
             child: _editingNote
                 ? _buildNoteEditor()
                 : _buildNoteViewer(attendee),
           ),
+          // Edit button — plain, no tray, anchored to the note panel
+          if (!_isRunning && !_editingNote)
+            Positioned(
+              top: 10,
+              right: 10,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: FilledButton.tonalIcon(
+                  onPressed: _startEditNote,
+                  icon: const Icon(Icons.edit, size: 18),
+                  label: const Text('Edit'),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    textStyle: const TextStyle(fontSize: 18),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -631,40 +672,87 @@ class _MeetingScreenState extends State<MeetingScreen>
 
   Widget _buildNoteEditor() {
     final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.all(10),
-      child: Focus(
-        onKeyEvent: (node, event) {
-          if (event is KeyDownEvent &&
-              event.logicalKey == LogicalKeyboardKey.tab) {
-            final sel = _noteController.selection;
-            if (!sel.isValid) return KeyEventResult.ignored;
-            const indent = '  ';
-            _noteController.value = TextEditingValue(
-              text: _noteController.text.replaceRange(sel.start, sel.end, indent),
-              selection: TextSelection.collapsed(offset: sel.start + indent.length),
-            );
-            return KeyEventResult.handled;
-          }
-          return KeyEventResult.ignored;
-        },
-        child: TextField(
-          controller: _noteController,
-          maxLines: null,
-          expands: true,
-          textAlignVertical: TextAlignVertical.top,
-          autofocus: true,
-          style: TextStyle(color: scheme.onSurface, fontSize: 14),
-          decoration: InputDecoration(
-            hintText: 'Write markdown notes here…',
-            hintStyle: TextStyle(
-                color: scheme.onSurfaceVariant.withValues(alpha: 0.5)),
-            border: const OutlineInputBorder(),
-            filled: true,
-            fillColor: scheme.surfaceContainerHighest,
+    return Column(
+      children: [
+        // Button row — sits above the text field, no overlap at all
+        Padding(
+          padding: const EdgeInsets.all(10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: OutlinedButton(
+                  onPressed: _cancelEditNote,
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    foregroundColor: scheme.onSurface.withValues(alpha: 0.85),
+                    side: BorderSide(color: scheme.onSurface.withValues(alpha: 0.4)),
+                    textStyle: const TextStyle(fontSize: 18),
+                  ),
+                  child: const Text('Cancel'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: FilledButton(
+                  onPressed: _saveNote,
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    textStyle: const TextStyle(fontSize: 18),
+                  ),
+                  child: const Text('Save'),
+                ),
+              ),
+            ],
           ),
         ),
-      ),
+        // Text field fills the rest
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+            child: Focus(
+              onKeyEvent: (node, event) {
+                if (event is KeyDownEvent &&
+                    event.logicalKey == LogicalKeyboardKey.tab) {
+                  final sel = _noteController.selection;
+                  if (!sel.isValid) return KeyEventResult.ignored;
+                  const indent = '  ';
+                  _noteController.value = TextEditingValue(
+                    text: _noteController.text
+                        .replaceRange(sel.start, sel.end, indent),
+                    selection: TextSelection.collapsed(
+                        offset: sel.start + indent.length),
+                  );
+                  return KeyEventResult.handled;
+                }
+                return KeyEventResult.ignored;
+              },
+              child: TextField(
+                controller: _noteController,
+                maxLines: null,
+                expands: true,
+                textAlignVertical: TextAlignVertical.top,
+                autofocus: true,
+                style: TextStyle(color: scheme.onSurface, fontSize: 18),
+                decoration: InputDecoration(
+                  hintText: 'Write markdown notes here…',
+                  hintStyle: TextStyle(
+                      color: scheme.onSurfaceVariant.withValues(alpha: 0.5)),
+                  border: const OutlineInputBorder(),
+                  filled: true,
+                  fillColor: scheme.surfaceContainerHighest,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -676,11 +764,11 @@ class _MeetingScreenState extends State<MeetingScreen>
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(Icons.note_add_outlined,
-                size: 40, color: scheme.onSurface.withValues(alpha: 0.2)),
+                size: 40, color: scheme.onSurface.withValues(alpha: 0.5)),
             const SizedBox(height: 10),
             Text('No notes',
                 style: TextStyle(
-                    color: scheme.onSurface.withValues(alpha: 0.35),
+                    color: scheme.onSurface.withValues(alpha: 0.5),
                     fontSize: 14)),
           ],
         ),
@@ -741,3 +829,59 @@ class _MeetingScreenState extends State<MeetingScreen>
         onAttendeeJump: _jumpTo,
       );
 }
+
+// ── Ring clock painter ─────────────────────────────────────────────────────
+// White ring with a single dot indicator that travels counterclockwise.
+// progress 0.0 → dot at 12 o'clock; progress 1.0 → dot back at 12 o'clock.
+
+class _RingClockPainter extends CustomPainter {
+  final double progress; // 0.0 → 1.0 from AnimationController.value
+  final Color dotColor;
+  final Color ringColor;
+
+  _RingClockPainter({
+    required this.progress,
+    required this.dotColor,
+    required this.ringColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.shortestSide * 0.38;
+    final ringStroke = size.shortestSide * 0.04;
+    final dotRadius = size.shortestSide * 0.04;
+
+    // Ring
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..color = ringColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = ringStroke,
+    );
+
+    // Dot travels counterclockwise starting at 12 o'clock (−π/2).
+    final angle = -pi / 2 - progress * 2 * pi;
+    final dotCenter = Offset(
+      center.dx + radius * cos(angle),
+      center.dy + radius * sin(angle),
+    );
+
+    // Fixed dot at 12 o'clock
+    canvas.drawCircle(
+      Offset(center.dx, center.dy - radius),
+      dotRadius * 1.5,
+      Paint()..color = ringColor,
+    );
+
+    // Solid dot
+    canvas.drawCircle(dotCenter, dotRadius, Paint()..color = dotColor);
+  }
+
+  @override
+  bool shouldRepaint(_RingClockPainter old) =>
+      old.progress != progress || old.dotColor != dotColor;
+}
+
