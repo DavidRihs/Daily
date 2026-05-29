@@ -1,0 +1,24 @@
+# Flutter build output — built inside Docker, not needed in build context
+build/
+
+# Flutter/Dart tool caches
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+
+# Platform folders not used (web-only project)
+android/
+ios/
+linux/
+macos/
+windows/
+
+# Git and dev files
+.git/
+.gitignore
+*.md
+analysis_options.yaml
+
+# Server tool cache
+server/.dart_tool/

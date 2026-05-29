@@ -1,0 +1,16 @@
+services:
+  daily:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persist meeting data across container rebuilds
+      - daily-data:/data
+    environment:
+      PORT: "8080"
+      STATIC_PATH: "/app/web"
+      DATA_PATH: "/data/meetings.json"
+
+volumes:
+  daily-data:

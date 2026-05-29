@@ -1,17 +1,18 @@
-name: daily_stemys
-description: "A new Flutter project."
+name: daily
+description: "Multi-meeting standup organizer with notes and timers."
 publish_to: "none"
-version: 0.1.0
+version: 0.2.0
 
 environment:
   sdk: ^3.5.1
 
 dependencies:
-  firebase_core: ^2.24.2
-  firebase_database: ^10.4.0
   flutter:
     sdk: flutter
   flutter_svg: ^2.0.10+1
+  flutter_markdown: ^0.7.4
+  uuid: ^4.5.1
+  http: ^1.2.1
 
 dev_dependencies:
   flutter_test:
