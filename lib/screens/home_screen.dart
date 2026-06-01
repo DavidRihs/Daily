@@ -114,7 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
             MaterialBanner(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               content: const Text(
-                  'Cannot reach server (http://localhost:8080). Start the Dart server and refresh.'),
+                  'Cannot reach server. Check your connection and retry.'),
               backgroundColor: Colors.red.shade900,
               actions: [
                 TextButton(

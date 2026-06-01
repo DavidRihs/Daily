@@ -14,7 +14,11 @@ class StorageService {
       final base = Uri.base;
       // Dev: Flutter dev server is NOT on 8080, so we must target 8080 explicitly.
       // Production: app is served by the Dart server on the same origin.
-      final isDev = base.port != 8080;
+      // Dev: Flutter dev server runs on a non-standard port (e.g. 8081, random).
+      // Production: served by the Dart server on port 80/443 or 8080 — use
+      // a relative path so it works behind any reverse proxy or port mapping.
+      const standardPorts = {0, 80, 443, 8080};
+      final isDev = !standardPorts.contains(base.port);
       if (isDev) return '${base.scheme}://${base.host}:8080/api';
       return '/api';
     }
