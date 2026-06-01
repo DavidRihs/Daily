@@ -39,3 +39,5 @@ server/.dart_tool/
 server/.packages
 server/bin/server
 server/meetings.json
+daily.tar
+meetings.json

@@ -1,6 +1,7 @@
 services:
   daily:
     build: .
+    image: daily-daily:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -10,7 +11,7 @@ services:
     environment:
       PORT: "8080"
       STATIC_PATH: "/app/web"
-      DATA_PATH: "/data/meetings.json"
+      DATA_PATH: "/data/meetings.db"
 
 volumes:
   daily-data:

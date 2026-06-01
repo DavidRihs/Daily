@@ -37,6 +37,10 @@ RUN flutter build web --release --no-wasm-dry-run
 # ── Stage 2: AOT-compile the Dart server ──────────────────────────────────────
 FROM dart:stable AS dart-build
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY server/pubspec.yaml server/pubspec.lock server/
 RUN cd server && dart pub get --no-precompile
@@ -48,6 +52,11 @@ RUN cd server && dart pub get --offline \
 # ── Stage 3: Minimal runtime image ────────────────────────────────────────────
 FROM debian:bookworm-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s libsqlite3.so.0 /usr/lib/$(uname -m)-linux-gnu/libsqlite3.so
+
 WORKDIR /app
 
 COPY --from=dart-build  /app/server/bin/server /app/server
@@ -57,7 +66,7 @@ RUN mkdir -p /data
 
 ENV PORT=8080
 ENV STATIC_PATH=/app/web
-ENV DATA_PATH=/data/meetings.json
+ENV DATA_PATH=/data/meetings.db
 
 EXPOSE 8080
 CMD ["/app/server"]

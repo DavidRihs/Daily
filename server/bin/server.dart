@@ -6,37 +6,168 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_cors_headers/shelf_cors_headers.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:shelf_static/shelf_static.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 void _log(String msg) => stdout.writeln(msg);
 
-// ── Data file ──────────────────────────────────────────────────────────────
+// ── Database ────────────────────────────────────────────────────────────────
 
-final _dataFile = File(Platform.environment['DATA_PATH'] ?? 'meetings.json');
+late final Database _db;
 
-List<dynamic> _load() {
-  if (!_dataFile.existsSync()) return [];
+void _initDb(String dbPath) {
+  _db = sqlite3.open(dbPath);
+  // WAL mode allows concurrent reads during writes and prevents file corruption
+  // on simultaneous saves from multiple clients.
+  _db.execute('PRAGMA journal_mode=WAL;');
+  _db.execute('PRAGMA foreign_keys=ON;');
+  _db.execute('''
+    CREATE TABLE IF NOT EXISTS meetings (
+      id               TEXT    PRIMARY KEY,
+      name             TEXT    NOT NULL,
+      notes_enabled    INTEGER NOT NULL DEFAULT 0,
+      time_enabled     INTEGER NOT NULL DEFAULT 1,
+      time_per_person  INTEGER NOT NULL DEFAULT 40,
+      sort_order       INTEGER NOT NULL DEFAULT 0,
+      last_session_start TEXT,
+      last_session_end   TEXT
+    );
+  ''');
+  _db.execute('''
+    CREATE TABLE IF NOT EXISTS attendees (
+      id             TEXT    PRIMARY KEY,
+      meeting_id     TEXT    NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+      name           TEXT    NOT NULL,
+      enabled        INTEGER NOT NULL DEFAULT 1,
+      note           TEXT    NOT NULL DEFAULT '',
+      note_edited_at TEXT,
+      sort_order     INTEGER NOT NULL DEFAULT 0
+    );
+  ''');
+}
+
+// ── Migration from legacy meetings.json ─────────────────────────────────────
+
+void _migrateFromJson(String dbPath) {
+  // Look for a sibling .json file (same path but with .json extension).
+  final jsonPath = dbPath.replaceFirst(RegExp(r'\.db$'), '.json');
+  if (jsonPath == dbPath) return; // DATA_PATH has no .db extension — skip
+  final jsonFile = File(jsonPath);
+  if (!jsonFile.existsSync()) return;
+
+  _log('Found legacy $jsonPath — migrating to SQLite…');
   try {
-    return jsonDecode(_dataFile.readAsStringSync()) as List<dynamic>;
-  } catch (_) {
-    return [];
+    final raw = jsonDecode(jsonFile.readAsStringSync());
+    if (raw is List && raw.isNotEmpty) {
+      _saveMeetings(raw);
+    }
+    jsonFile.renameSync('$jsonPath.migrated');
+    _log('Migration complete. Legacy file renamed to ${jsonFile.path}.migrated');
+  } catch (e) {
+    _log('Warning: migration from $jsonPath failed: $e');
   }
 }
 
-void _save(List<dynamic> data) =>
-    _dataFile.writeAsStringSync(jsonEncode(data));
+// ── Data access ─────────────────────────────────────────────────────────────
 
-// ── Handlers ───────────────────────────────────────────────────────────────
+List<dynamic> _loadMeetings() {
+  final result = <dynamic>[];
+  for (final row in _db.select('SELECT * FROM meetings ORDER BY sort_order')) {
+    final attendees = _db
+        .select(
+          'SELECT * FROM attendees WHERE meeting_id = ? ORDER BY sort_order',
+          [row['id']],
+        )
+        .map((a) => <String, dynamic>{
+              'id': a['id'],
+              'name': a['name'],
+              'enabled': a['enabled'] == 1,
+              'note': a['note'],
+              if (a['note_edited_at'] != null) 'noteEditedAt': a['note_edited_at'],
+            })
+        .toList();
+
+    final meeting = <String, dynamic>{
+      'id': row['id'],
+      'name': row['name'],
+      'notesEnabled': row['notes_enabled'] == 1,
+      'timeEnabled': row['time_enabled'] == 1,
+      'timePerPerson': row['time_per_person'],
+      'attendees': attendees,
+    };
+    if (row['last_session_start'] != null && row['last_session_end'] != null) {
+      meeting['lastSession'] = {
+        'startTime': row['last_session_start'],
+        'endTime': row['last_session_end'],
+      };
+    }
+    result.add(meeting);
+  }
+  return result;
+}
+
+void _saveMeetings(List<dynamic> data) {
+  _db.execute('BEGIN');
+  try {
+    _db.execute('DELETE FROM meetings');
+    for (var i = 0; i < data.length; i++) {
+      final m = data[i] as Map<String, dynamic>;
+      final lastSession = m['lastSession'] as Map<String, dynamic>?;
+      _db.execute(
+        '''INSERT INTO meetings
+             (id, name, notes_enabled, time_enabled, time_per_person,
+              sort_order, last_session_start, last_session_end)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        [
+          m['id'],
+          m['name'],
+          (m['notesEnabled'] as bool? ?? false) ? 1 : 0,
+          (m['timeEnabled'] as bool? ?? true) ? 1 : 0,
+          m['timePerPerson'] ?? 40,
+          i,
+          lastSession?['startTime'],
+          lastSession?['endTime'],
+        ],
+      );
+      final attendees = m['attendees'] as List<dynamic>? ?? [];
+      for (var j = 0; j < attendees.length; j++) {
+        final a = attendees[j] as Map<String, dynamic>;
+        _db.execute(
+          '''INSERT INTO attendees
+               (id, meeting_id, name, enabled, note, note_edited_at, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?)''',
+          [
+            a['id'],
+            m['id'],
+            a['name'],
+            (a['enabled'] as bool? ?? true) ? 1 : 0,
+            a['note'] ?? '',
+            a['noteEditedAt'],
+            j,
+          ],
+        );
+      }
+    }
+    _db.execute('COMMIT');
+  } catch (e) {
+    _db.execute('ROLLBACK');
+    rethrow;
+  }
+}
+
+// ── HTTP handlers ────────────────────────────────────────────────────────────
 
 Response _jsonOk(Object body) => Response.ok(
       jsonEncode(body),
       headers: {'content-type': 'application/json; charset=utf-8'},
     );
 
-Response _badRequest(String msg) => Response(400,
-    body: jsonEncode({'error': msg}),
-    headers: {'content-type': 'application/json; charset=utf-8'});
+Response _badRequest(String msg) => Response(
+      400,
+      body: jsonEncode({'error': msg}),
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
 
-Future<Response> _getMeetings(Request _) async => _jsonOk(_load());
+Future<Response> _getMeetings(Request _) async => _jsonOk(_loadMeetings());
 
 Future<Response> _putMeetings(Request req) async {
   final body = await req.readAsString();
@@ -47,33 +178,41 @@ Future<Response> _putMeetings(Request req) async {
     return _badRequest('Invalid JSON');
   }
   if (parsed is! List) return _badRequest('Expected a JSON array');
-  _save(parsed);
+  try {
+    _saveMeetings(parsed);
+  } catch (e) {
+    return Response.internalServerError(
+      body: jsonEncode({'error': 'Database error: $e'}),
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+  }
   return _jsonOk({'ok': true});
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────────
 
 void main(List<String> args) async {
   final port = int.tryParse(Platform.environment['PORT'] ?? '8080') ?? 8080;
+  final dbPath = Platform.environment['DATA_PATH'] ?? 'meetings.db';
+
+  _initDb(dbPath);
+  _migrateFromJson(dbPath);
+  _log('Database: ${File(dbPath).absolute.path}');
 
   final router = Router()
     ..get('/api/meetings', _getMeetings)
     ..put('/api/meetings', _putMeetings)
-    // Catch-all for unknown /api/* routes — prevents the static handler from
-    // serving index.html for API misses (e.g. wrong method or unknown path).
     ..all('/api/<ignored|.*>', (Request _) => Response.notFound(
           '{"error":"not found"}',
           headers: {'content-type': 'application/json; charset=utf-8'},
         ));
 
-  // Serve built Flutter web app if the directory exists
   final staticDir =
       Directory(Platform.environment['STATIC_PATH'] ?? '../build/web');
   Handler staticHandler;
   if (staticDir.existsSync()) {
     final fileHandler =
         createStaticHandler(staticDir.path, defaultDocument: 'index.html');
-    // Fallback: any unmatched route serves index.html (SPA support)
     staticHandler = (Request req) async {
       final res = await fileHandler(req);
       if (res.statusCode == 404) {
@@ -83,8 +222,8 @@ void main(List<String> args) async {
     };
     _log('Serving Flutter app from: ${staticDir.absolute.path}');
   } else {
-    staticHandler = (req) => Response.notFound('Static files not found. '
-        'Run `flutter build web` first, or set STATIC_PATH.');
+    staticHandler = (req) => Response.notFound(
+        'Static files not found. Run `flutter build web` first, or set STATIC_PATH.');
     _log('No static files found at ${staticDir.path} — API only mode.');
   }
 
@@ -102,5 +241,4 @@ void main(List<String> args) async {
   final server = await shelf_io.serve(pipeline, '0.0.0.0', port);
   server.autoCompress = true;
   _log('Server listening on http://0.0.0.0:${server.port}');
-  _log('Data file: ${_dataFile.absolute.path}');
 }
